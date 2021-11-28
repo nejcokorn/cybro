@@ -4,7 +4,7 @@ const { CybroComm } = require('./comm');
 controllers = [];
 
 module.exports = {
-	getController: (address, port = 8442, nad, password) => {
+	getController: async (address, port = 8442, nad, password) => {
 		// Check if controller object has already been created
 		let controller = controllers.find((controller) => {
 			return controller.address == address;
