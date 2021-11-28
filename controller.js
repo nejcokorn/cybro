@@ -225,6 +225,11 @@ class CybroController extends EventEmitter {
 			return frame.socket == parseInt(s.ID);
 		});
 
+		if (!socket) {
+			console.log(`Socket for frame ${JSON.stringify(frame)} not found`);
+			return;
+		}
+
 		// Get variable keys
 		let keys = Object.keys(socket).filter((v) => {
 			return /^Var/.test(v);
