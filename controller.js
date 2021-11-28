@@ -4,74 +4,60 @@ const JSZip = require('jszip');
 
 class CybroController extends EventEmitter {
 
-	nextNad() {
-		this.currentNad = this.currentNad && this.currentNad < 4027470283 ? this.currentNad + 1 : 4027370283;
-		return this.currentNad;
-	}
-
-	constructor(cybro, address, port, nad, password) {
+	constructor(address, port, nad, password) {
 		super();
-		
+
 		let controller = this;
-		
+
 		// Link parameters
-		this.cybro = cybro;
 		this.address = address;
 		this.port = port;
 		this.nad = nad;
 		this.password = password;
-		
+
 		this.sockets = [];
 		this.plcStatus = null;
 		this.fileDescriptorSize = 46;
 
-		this.on('frame', (frame) => {
-			// Process the socket when socket is not 0
-			if (frame.socket != 0) {
-				return this._processSocket(frame);
-			}
-			
-			// Direction 1 means it is a response to one of the waiting requests
-			if (frame.direction == 1) {
-				this.emit(`nad_${frame.nadTo}`, frame);
-			}
+		// TODO pick nadFrom from range
+		this.comm = new CybroComm(this, this.address, this.port, 4027470283, this.nad, this.password);
+
+		this.comm.on('socket', (frame) => {
+			this._processSocket(frame);
 		});
 	}
-	
+
+	async connect() {
+		await this.comm.connect();
+	}
+
 	async ping() {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		return await comm.ping();
+		return await this.comm.ping();
 	}
 
 	async status() {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		this.plcStatus = await comm.status();
+		this.plcStatus = await this.comm.status();
 		return this.plcStatus;
 	}
 
 	async write(variables) {
 		if (variables instanceof Array) {
-			let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-			return await comm.write(variables);
+			return await this.comm.write(variables);
 		} else {
-			let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-			return await comm.write([variables]);
+			return await this.comm.write([variables]);
 		}
 	}
 
 	async read(variables) {
 		if (variables instanceof Array) {
-			let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-			return await comm.read(variables);
+			return await this.comm.read(variables);
 		} else {
-			let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-			return (await comm.read([variables]))[0];
+			return (await this.comm.read([variables]))[0];
 		}
 	}
 
 	async plcStart() {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		let success = await comm.plcStart();
+		let success = await this.comm.plcStart();
 		if (success) {
 			this.plcStatus = 2;
 		}
@@ -79,8 +65,7 @@ class CybroController extends EventEmitter {
 	}
 
 	async plcStop() {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		let success = await comm.plcStop();
+		let success = await this.comm.plcStop();
 		if (success) {
 			this.plcStatus = 0;
 		}
@@ -88,8 +73,7 @@ class CybroController extends EventEmitter {
 	}
 
 	async plcPause() {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		let success = await comm.plcPause();
+		let success = await this.comm.plcPause();
 		if (success) {
 			this.plcStatus = 1;
 		}
@@ -97,8 +81,7 @@ class CybroController extends EventEmitter {
 	}
 
 	async password(password, reset) {
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-		let success = await comm.password(password, reset);
+		let success = await this.comm.password(password, reset);
 		if (reset && success) {
 			this.password = 0;
 		} else if (!reset && success) {
@@ -110,17 +93,15 @@ class CybroController extends EventEmitter {
 	async readConfiguration() {
 		let files = [];
 
-		let comm = new CybroComm(this, this.address, this.port, this.nextNad(), this.nad, this.password);
-
 		// Get descriptor information
-		let descriptorBuf = await comm.readCode(0x020040, 6);
+		let descriptorBuf = await this.comm.readCode(0x020040, 6);
 
 		// Parse descriptors
 		let descriptorAddress = descriptorBuf.readUInt32LE();
 		let descriptorFiles = descriptorBuf.readUInt16LE(4);
 
 		// Each file is described with 46 bytes
-		let filesDescriptorBuf = await comm.readCode(descriptorAddress, descriptorFiles * this.fileDescriptorSize);
+		let filesDescriptorBuf = await this.comm.readCode(descriptorAddress, descriptorFiles * this.fileDescriptorSize);
 
 		for(let i = 0; i < descriptorFiles; i++) {
 
@@ -133,7 +114,7 @@ class CybroController extends EventEmitter {
 			}
 
 			// Read the file from zip
-			let zipContent = await comm.readCode(zipFile.address, zipFile.size);
+			let zipContent = await this.comm.readCode(zipFile.address, zipFile.size);
 			files = await new Promise(async (resolve, reject) => {
 				let files = [];
 
@@ -170,32 +151,32 @@ class CybroController extends EventEmitter {
 		let section = null;
 		let sectionOptions = {};
 		let lines = file.replace(/[\r]/g, '').split('\n');
-		
+
 		this.sockets = [];
 		this.options = {};
-		
+
 		// Remove first line
 		lines.shift();
-		
+
 		for(let line of lines) {
 			line = line.trim();
-			
+
 			if(line == '#PROJECT_OPTIONS_END'){
 				break;
 			}
-			
+
 			if (!line.length) {
 				continue;
 			}
-			
+
 			if(/^\[.+/.test(line)){
-				
+
 				if (/^Socket.+/.test(section)) {
 					controller.sockets.push(sectionOptions)
 				} else if (section) {
 					this.options[section] = sectionOptions;
 				}
-				
+
 				section = line.trim().substring(1, line.length-1);
 				sectionOptions = {};
 			} else {
@@ -203,7 +184,7 @@ class CybroController extends EventEmitter {
 			}
 		}
 	}
-	
+
 	_parseAlocation(file) {
 		// Split by new lines
 		let lines = file.replace(/[\r]/g, '').split('\n');
@@ -220,7 +201,7 @@ class CybroController extends EventEmitter {
 		this.registry = {};
 		for(let line of lines){
 			let varInfo = line.replace(/  +/g, ' ').split(' ');
-			
+
 			let varObj = {
 				address: varInfo.shift(),
 				id: varInfo.shift(),
@@ -235,26 +216,26 @@ class CybroController extends EventEmitter {
 			this.registry[varObj.name] = varObj;
 		}
 	}
-	
+
 	_processSocket(frame) {
 		let offset = 0;
-		
+
 		// Find the socket
 		let socket = this.sockets.find((s) => {
 			return frame.socket == parseInt(s.ID);
 		});
-		
+
 		// Get variable keys
 		let keys = Object.keys(socket).filter((v) => {
 			return /^Var/.test(v);
 		});
-		
+
 		for(let key of keys){
 			let type = this.registry[socket[key]].type;
 			let size = parseInt(this.registry[socket[key]].size);
-			
+
 			let value = null;
-			
+
 			switch (type) {
 				case 'bit':
 					value = frame.data.readUInt8(offset);
@@ -269,17 +250,17 @@ class CybroController extends EventEmitter {
 					value = frame.data.readFloatLE(offset);
 					break;
 			}
-			
+
 			// Add to offset
 			offset += size;
-			
+
 			// Check if value has changed
 			// TODO check socket type
 			if (this.registry[socket[key]].value != value) {
 				this.registry[socket[key]].value = value
-				
+
 				// Emit value
-				this.emit(`var_${socket[key]}`, value);
+				this.emit(`${socket[key]}`, value);
 			}
 		}
 	}

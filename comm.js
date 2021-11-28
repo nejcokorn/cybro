@@ -1,4 +1,7 @@
-class CybroComm {
+const EventEmitter = require('events');
+const dgram = require('dgram');
+
+class CybroComm extends EventEmitter {
 
 	// This is how the frame package looks like
 	// aa55 0600 16510000 714c57b8 01 00 0102 0000 d04b
@@ -13,7 +16,11 @@ class CybroComm {
 	// d04b -  checksum
 
 	constructor(controller, address, port, nadFrom, nadTo, password) {
-		
+		super();
+
+		this.lastPromiseQueue = new Promise(async(resolve, reject) => { resolve(); });
+
+		this.socket = null
 		this.controller = controller;
 		this.address = address;
 		this.port = port;
@@ -36,93 +43,279 @@ class CybroComm {
 		}
 	}
 
+	async connect() {
+		return new Promise(async (resolve, reject) => {
+			// Create socket
+			this.socket = dgram.createSocket({
+				type: 'udp4',
+				reuseAddr: true
+			});
+
+			// Log close event
+			this.socket.on('close', () => {
+				console.log("Socket closed");
+			});
+
+			// Log connect event
+			this.socket.on('connect', () => {
+				console.log("Socket connected");
+			});
+
+			// Log error events
+			this.socket.on('error', (err) => {
+				console.log("Socket error");
+				console.error(err);
+			});
+
+			// Log listening event
+			this.socket.on('listening', () => {
+				console.log("Socket listening");
+				resolve();
+			});
+
+			// Monitor messages
+			this.socket.on('message', (data, rinfo) => {
+
+				// Parse frame
+				let frame = CybroComm.frameParse(data);
+
+				// Skip if package does not originate from registred controller
+				if (rinfo.address != this.address) {
+					return;
+				}
+
+				// Check if package is a socket data from controller
+				if (frame.socket != 0) {
+					return this.emit(`socket`, frame);
+				}
+
+				// Direction 1 means it is a response to one of the waiting requests
+				if (frame.direction == 1) {
+					this.emit(`response`, frame);
+				}
+			});
+			
+			// Start listening to UDP port
+			this.socket.bind(this.port);
+		});
+	}
+
+	static async autodetect(port) {
+		return new Promise(async (resolve, reject) => {
+			// Array of controllers
+			let controllers = [];
+			
+			// Create new socket
+			let socket = dgram.createSocket({
+				type: 'udp4',
+				reuseAddr: true
+			});
+
+			// Create autodetect broadcast frame
+			let nadFrom = 4027370282;
+			let frame = CybroComm.frame(0, 0, nadFrom, 0, Buffer.from([0x11]), 0);
+
+			// Wait for socket to start listening
+			socket.on('listening', () => {
+				// Set broadcast
+				socket.setBroadcast(true);
+
+				// Send autodetect package
+				socket.send(frame, port, '255.255.255.255', (err) => {
+					if (err) {
+						reject(err);
+					}
+				});
+			});
+
+			// Wait for responses
+			socket.on('message', (buffer, rinfo) => {
+				// CybroComm.frameVerify(buffer);
+				// Parse UDP package
+				let frame = CybroComm.frameParse(buffer);
+
+				// Any response is a controller
+				if (frame.direction == 1) {
+					controllers.push({ address: rinfo.address, nad: frame.nadFrom });
+				}
+			});
+
+			// Start listening to UDP port
+			socket.bind(port);
+
+			// After 50 miliseconds return set of available controllers
+			setTimeout(() => {
+				// Stop listening
+				socket.close();
+
+				// Return controllers
+				resolve(controllers);
+			}, 50);
+		});
+	}
+
+	async lock() {
+		// Get last item in queue
+		let queuePromise = this.lastPromiseQueue;
+
+		// Create lock object
+		let lock = {
+			release: () => {}
+		}
+
+		// New promise for this lock
+		this.lastPromiseQueue = new Promise(async(resolve, reject) => {
+			lock.release = resolve;
+		});
+
+		// Wait for existing promises in queue
+		await queuePromise;
+
+		// Return lock object
+		return lock;
+	}
+
 	async ping() {
-		// Create ping frame
-		let framePing = this.frame(0, 0, Buffer.from([this.cmd.ping]));
-		// Measure time before sending ping package
-		let startTime = process.hrtime();
-		// Any response back is success
-		let pong = await this.send(framePing);
-		// Measure time after receiving response from the ping package
-		let endTime = process.hrtime();
-		// Returned time is in miliseconds
-		return (endTime[0] - startTime[0]) * 1000 + (endTime[1] - startTime[1]) / 10000000;
+		// Wait for active connections
+		let lock = await this.lock();
+
+		try {
+			// Create ping frame
+			let framePing = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.ping]), this.password);
+			// Measure time before sending ping package
+			let startTime = process.hrtime();
+			// Any response back is success
+			let pong = await this.send(framePing);
+			// Measure time after receiving response from the ping package
+
+			// Evaluate time passed
+			var elapsedSeconds = process.hrtime(startTime)[0];
+			var elapsedTheRest = process.hrtime(startTime)[1] / 1000000000;
+
+			// Returned time is in miliseconds
+			return Number(elapsedSeconds) + Number(elapsedTheRest.toFixed(6));
+		} catch (e) {
+			return false;
+		} finally {
+			// Release the lock
+			lock.release();
+		}
 	}
 
 	async status() {
-		let frameStatus = this.frame(0, 0, Buffer.from([this.cmd.status]));
-		let status = await this.send(frameStatus);
-		
-		if (status.data[0] == 0){
-			return -1;
-		} else {
-			return status.data[1];
+		// Wait for active connections
+		let lock = await this.lock();
+
+		try {
+			let framePlcStart = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcStart]), this.password);
+			await this.send(framePlcStart);
+
+			let frameStatus = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.status]), this.password);
+			let status = await this.send(frameStatus);
+
+			if (status.data[0] == 0){
+				return -1;
+			} else {
+				return status.data[1];
+			}
+		} catch (e) {
+			return false;
+		} finally {
+			// Release the lock
+			lock.release();
 		}
 	}
 
 	async plcStart() {
+		// Wait for active connections
+		let lock = await this.lock();
+
 		try {
-			let framePlcStart = this.frame(0, 0, Buffer.from([this.cmd.plcStart]));
+			let framePlcStart = CybroComm.frame(0, 0, this.nadfrom, this.nadTo, Buffer.from([this.cmd.plcStart]), this.password);
 			await this.send(framePlcStart);
+			return true;
 		} catch (e) {
 			return false;
 		} finally {
-			return true;
+			// Release the lock
+			lock.release();
 		}
 	}
 
 	async plcStop() {
+		// Wait for active connections
+		let lock = await this.lock();
+
 		try {
-			let framePlcStop = this.frame(0, 0, Buffer.from([this.cmd.plcStop]));
+			let framePlcStop = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcStop]), this.password);
 			await this.send(framePlcStop);
+			return true;
 		} catch (e) {
 			return false;
 		} finally {
-			return true;
+			// Release the lock
+			lock.release();
 		}
 	}
 
 	async plcPause() {
+		// Wait for active connections
+		let lock = await this.lock();
+
 		try {
-			let framePlcPause = this.frame(0, 0, Buffer.from([this.cmd.plcPause]));
+			let framePlcPause = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcPause]), this.password);
 			await this.send(framePlcPause);
-		} catch (e) {
-			return false;
-		} finally {
+
+			// Release the lock
+			lock.release();
 			return true;
+		} catch (e) {
+			// Release the lock
+			lock.release();
+			return false;
 		}
 	}
 
 	async readCode(address, size) {
-		let codeBuffer = Buffer.alloc(size);
+		// Wait for active connections
+		let lock = await this.lock();
 
-		// Extract code from segments
-		let segment = Math.floor(address / this.segmentSize);
-		let blocks = Math.floor((address + size) / this.segmentSize) - segment + 1;
-		let segmentBuffer = await this.readSegment(segment, blocks);
-		
-		// Copy wanted code from segment data
-		segmentBuffer.copy(codeBuffer, 0, address % this.segmentSize, address % this.segmentSize + size);
-		
-		return codeBuffer;
+		try {
+			let codeBuffer = Buffer.alloc(size);
+
+			// Extract code from segments
+			let segment = Math.floor(address / this.segmentSize);
+			let blocks = Math.floor((address + size) / this.segmentSize) - segment + 1;
+			let segmentBuffer = await this.readSegment(segment, blocks);
+
+			// Copy wanted code from segment data
+			segmentBuffer.copy(codeBuffer, 0, address % this.segmentSize, address % this.segmentSize + size);
+
+			return codeBuffer;
+		} catch (err) {
+			return err
+		} finally {
+			// Release the lock
+			lock.release();
+		}
 	}
-	
+
 	async readSegment(segment, blocks) {
 		let data = Buffer.alloc(0);
-		
+
 		// Read blocks
 		for(let i = 0; i < blocks; i++) {
 			let frameDataBuf = Buffer.alloc(5);
 			frameDataBuf.writeUInt8(this.cmd.readCode);
 			frameDataBuf.writeUInt16LE(segment + i, 1);
 			frameDataBuf.writeUInt16LE(this.segmentSize, 3);
-			let frame = this.frame(0, 0, frameDataBuf);
-			
+			let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, frameDataBuf, this.password);
+
 			let chunkFrame = await this.send(frame);
-			
+
 			data = Buffer.concat([data, chunkFrame.data], data.length + chunkFrame.data.length);
 		}
-		
+
 		return data;
 	}
 
@@ -187,30 +380,40 @@ class CybroComm {
 			offset += 2;
 		}
 
-		// Parse returned frame
-		let frame = this.frame(0, 0, dataBuf);
-		let responseFrame = await this.send(frame);
+		// Create frame
+		let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, dataBuf, this.password);
 
-		// Parse values
-		offset = 0;
-		for (let variable of variables) {
-			switch (controller.registry[variable.name].type) {
-				case 'bit':
+		// Wait for active connections
+		let lock = await this.lock();
+
+		try {
+			let responseFrame = await this.send(frame);
+
+			// Parse values
+			offset = 0;
+			for (let variable of variables) {
+				switch (controller.registry[variable.name].type) {
+					case 'bit':
 					variable.value = responseFrame.data.readUInt8(offset);
 					break;
-				case 'int':
+					case 'int':
 					variable.value = responseFrame.data.readInt16LE(offset);
 					break;
-				case 'long':
+					case 'long':
 					variable.value = responseFrame.data.readInt32LE(offset);
 					break;
-				case 'real':
+					case 'real':
 					variable.value = responseFrame.data.readFloatLE(offset);
 					break;
+				}
+				offset += parseInt(controller.registry[variable.name].size);
 			}
-			offset += parseInt(controller.registry[variable.name].size);
+		} catch (e) {
+			// TODO
+		} finally {
+			// Release the lock
+			lock.release();
 		}
-
 		return variables;
 	}
 
@@ -294,57 +497,91 @@ class CybroComm {
 			offset += parseInt(controller.registry[variable.name].size);
 		}
 
-		let frame = this.frame(0, 0, dataBuf);
-		await this.send(frame);
-		
-		return true;
+		// Create frame
+		let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, dataBuf, this.password);
+
+		// Wait for active connections
+		let lock = await this.lock();
+
+		try {
+			await this.send(frame);
+			return true;
+		} catch (e) {
+			return false;
+		} finally {
+			// Release the lock
+			lock.release();
+		}
 	}
-	
-	async send(frame) {
-		let comm = this;
+
+	async send(frame, retry = 5) {
 		return new Promise(async (resolve, reject) => {
-			comm.controller.cybro.socket.send(frame, this.port, this.address, (err) => {
+			this.socket.send(frame, this.port, this.address, (err) => {
 				// Reject on error
 				if (err) {
 					reject(err);
 				}
 			});
 
-			// wait for the replay from the controller
-			comm.controller.once(`nad_${comm.nadFrom}`, (frame) => {
+			// Define timeout
+			let timeout = null;
+
+			// Callback for response processing
+			let callback = (frame) => {
+				clearTimeout(timeout);
 				resolve(frame);
-			})
+			}
+
+			// Listen for the response event
+			this.once(`response`, callback);
+
+			// Set timeout for this request
+			timeout = setTimeout(async () => {
+				this.removeListener(`frame`, callback);
+
+				// Retry failed attempt
+				if (retry > 1) {
+					try {
+						await this.send(frame, --retry);
+						resolve();
+					} catch (e) {
+						reject();
+					}
+				} else {
+					reject();
+				}
+			}, 3);
 		});
 	}
 
-	frame(direction, socket, dataBuf) {
+	static frame(direction, socket, nadFrom, nadTo, dataBuf, password) {
 		// Create buffers
 		let signatureBuf = Buffer.from("aa55", 'hex');
-		
+
 		let lengthBuf = (new Buffer.alloc(2))
 		lengthBuf.writeUInt16LE(dataBuf.length + 4);
-		
+
 		let nadFromBuf = (new Buffer.alloc(4))
-		nadFromBuf.writeUInt32LE(this.nadFrom);
-		
+		nadFromBuf.writeUInt32LE(nadFrom);
+
 		let nadToBuf = (new Buffer.alloc(4))
-		nadToBuf.writeUInt32LE(this.nadTo);
-		
+		nadToBuf.writeUInt32LE(nadTo);
+
 		let directionBuf = (new Buffer.alloc(1))
 		directionBuf.writeUInt8(direction);
-		
+
 		let socketBuf = (new Buffer.alloc(1))
 		socketBuf.writeUInt8(socket);
-		
-		let passwordBuf = this.password ? CybroComm.frameCRC(Buffer.from(this.password, 'utf8')) : Buffer.from("0000", 'hex');
-		
+
+		let passwordBuf = password ? CybroComm.frameCRC(Buffer.from(password, 'utf8')) : Buffer.from("0000", 'hex');
+
 		// Signature(2), Length(2), nadFrom(4), nadTo(4), direction(1), socket(1), data(x), password(2), crc(2)
 		let frame = Buffer.concat([signatureBuf, lengthBuf, nadFromBuf, nadToBuf, directionBuf, socketBuf, dataBuf, passwordBuf], 14 + passwordBuf.length + dataBuf.length);
 
 		// Calculate frame CRC and return buffer with crc
 		return Buffer.concat([frame, CybroComm.frameCRC(frame)], frame.length + 2);
 	}
-	
+
 	static frameParse(buf) {
 		if (!Buffer.isBuffer(buf)) {
 			throw new Error('Parameter should be of type Buffer');
@@ -357,7 +594,7 @@ class CybroComm {
 		if (!CybroComm.frameVerify(buf)) {
 			throw new Error('Incorrect frame CRC');
 		}
-		
+
 		let frame = null;
 		try {
 			frame = {
