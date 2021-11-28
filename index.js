@@ -5,7 +5,7 @@ const EventEmitter = require('events');
 
 // Single point where socket is maintained
 class Cybro extends EventEmitter {
-	constructor(port) {
+	constructor(port = 8442) {
 		super();
 
 		this.port = port;
@@ -42,7 +42,7 @@ class Cybro extends EventEmitter {
 		return controller;
 	}
 
-	async autodetect(port) {
+	static async autodetect(port = 8442) {
 		// Autodetect Cybro controllers
 		let controllers = await CybroComm.autodetect(port);
 
