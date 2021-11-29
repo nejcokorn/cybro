@@ -93,57 +93,61 @@ class CybroController extends EventEmitter {
 	async readConfiguration() {
 		let files = [];
 
-		// Get descriptor information
-		let descriptorBuf = await this.comm.readCode(0x020040, 6);
-
-		// Parse descriptors
-		let descriptorAddress = descriptorBuf.readUInt32LE();
-		let descriptorFiles = descriptorBuf.readUInt16LE(4);
-
-		// Each file is described with 46 bytes
-		let filesDescriptorBuf = await this.comm.readCode(descriptorAddress, descriptorFiles * this.fileDescriptorSize);
-
-		for(let i = 0; i < descriptorFiles; i++) {
-
-			let fileDescriptor = filesDescriptorBuf.slice(i * this.fileDescriptorSize, i * this.fileDescriptorSize + this.fileDescriptorSize);
-			let zipFile = {
-				name: fileDescriptor.slice(0, fileDescriptor.readUInt16LE(32)).toString(),
-				address: fileDescriptor.readUInt32LE(34),
-				size: fileDescriptor.readUInt32LE(38),
-				timestamp: fileDescriptor.readUInt32LE(42)
-			}
-
-			// Read the file from zip
-			let zipContent = await this.comm.readCode(zipFile.address, zipFile.size);
-			files = await new Promise(async (resolve, reject) => {
-				let files = [];
-
-				var zip = new JSZip();
-				let contents = await zip.loadAsync(zipContent);
-				for(let filename of Object.keys(contents.files)) {
-					let content = await zip.file(filename).async('nodebuffer');
-					files.push({
-						filename: filename,
-						content: content
-					});
+		try {
+			// Get descriptor information
+			let descriptorBuf = await this.comm.readCode(0x020040, 6);
+			
+			// Parse descriptors
+			let descriptorAddress = descriptorBuf.readUInt32LE();
+			let descriptorFiles = descriptorBuf.readUInt16LE(4);
+			
+			// Each file is described with 46 bytes
+			let filesDescriptorBuf = await this.comm.readCode(descriptorAddress, descriptorFiles * this.fileDescriptorSize);
+			
+			for(let i = 0; i < descriptorFiles; i++) {
+				
+				let fileDescriptor = filesDescriptorBuf.slice(i * this.fileDescriptorSize, i * this.fileDescriptorSize + this.fileDescriptorSize);
+				let zipFile = {
+					name: fileDescriptor.slice(0, fileDescriptor.readUInt16LE(32)).toString(),
+					address: fileDescriptor.readUInt32LE(34),
+					size: fileDescriptor.readUInt32LE(38),
+					timestamp: fileDescriptor.readUInt32LE(42)
 				}
-
-				resolve(files);
-			});
-
-			if (zipFile.name == 'cyp.zip') {
-				this._parseProgram(files[0].content.toString());
-			} else if (zipFile.name == 'alc.zip') {
-				this._parseAlocation(files[0].content.toString());
+				
+				// Read the file from zip
+				let zipContent = await this.comm.readCode(zipFile.address, zipFile.size);
+				files = await new Promise(async (resolve, reject) => {
+					let files = [];
+					
+					var zip = new JSZip();
+					let contents = await zip.loadAsync(zipContent);
+					for(let filename of Object.keys(contents.files)) {
+						let content = await zip.file(filename).async('nodebuffer');
+						files.push({
+							filename: filename,
+							content: content
+						});
+					}
+					
+					resolve(files);
+				});
+				
+				if (zipFile.name == 'cyp.zip') {
+					this._parseProgram(files[0].content.toString());
+				} else if (zipFile.name == 'alc.zip') {
+					this._parseAlocation(files[0].content.toString());
+				}
 			}
+			
+			// Read all values in registry
+			// As there is a direct link to the objects in registry the values will be assigned to that object
+			let registry = Object.entries(this.registry).map((item) => {
+				return item[1];
+			});
+			await this.read(registry);
+		} catch (e) {
+			return e;
 		}
-
-		// Read all values in registry
-		// As there is a direct link to the objects in registry the values will be assigned to that object
-		let registry = Object.entries(this.registry).map((item) => {
-			return item[1];
-		});
-		await this.read(registry);
 	}
 
 	_parseProgram(file){
