@@ -667,7 +667,7 @@ class CybroComm extends EventEmitter {
 				socket: buf.readUInt8(13),
 			}
 			frame.data = buf.slice(14, 14 + frame.length - 4);
-			frame.password = buf.readUInt16LE(14, 14 + buf.readUInt16LE(2));
+			frame.password = buf.readUInt16LE(14 + frame.length - 4);
 		} catch (e) {
 			return e;
 		} finally {
