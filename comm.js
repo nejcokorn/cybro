@@ -15,7 +15,7 @@ class CybroComm extends EventEmitter {
 	// 0000 - password
 	// d04b -  checksum
 
-	constructor(controller, address, port, nadFrom, nadTo, password) {
+	constructor(controller, address, port, nadTo, password) {
 		super();
 
 		this.lastPromiseQueue = new Promise(async(resolve, reject) => { resolve(); });
@@ -24,7 +24,6 @@ class CybroComm extends EventEmitter {
 		this.controller = controller;
 		this.address = address;
 		this.port = port;
-		this.nadFrom = nadFrom;
 		this.nadTo = nadTo;
 		this.password = password;
 
@@ -92,6 +91,7 @@ class CybroComm extends EventEmitter {
 				// Direction 1 means it is a response to one of the waiting requests
 				if (frame.direction == 1) {
 					this.emit(`response`, frame);
+					this.emit(`response_${frame.nadTo}`, frame);
 				}
 			});
 			
@@ -112,7 +112,7 @@ class CybroComm extends EventEmitter {
 			});
 
 			// Create autodetect broadcast frame
-			let nadFrom = 4027370282;
+			let nadFrom = CybroComm.randomNadFrom();
 			let frame = CybroComm.frame(0, 0, nadFrom, 0, Buffer.from([0x11]), 0);
 
 			// Wait for socket to start listening
@@ -135,7 +135,7 @@ class CybroComm extends EventEmitter {
 				let frame = CybroComm.frameParse(buffer);
 
 				// Any response is a controller
-				if (frame.direction == 1) {
+				if (frame.direction == 1 && frame.nadTo == nadFrom) {
 					controllers.push({ address: rinfo.address, nad: frame.nadFrom });
 				}
 			});
@@ -180,15 +180,18 @@ class CybroComm extends EventEmitter {
 		let lock = await this.lock();
 
 		try {
-			// Create ping frame
-			let framePing = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.ping]), this.password);
 			// Measure time before sending ping package
 			let startTime = process.hrtime();
 			// Any response back is success
-			let pong = await this.send(framePing);
-			// Measure time after receiving response from the ping package
+			let pong = await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: Buffer.from([this.cmd.ping]),
+				password: this.password
+			});
 
-			// Evaluate time passed
+			// Evaluate time passed after receiving response from the ping package
 			var elapsedSeconds = process.hrtime(startTime)[0];
 			var elapsedTheRest = process.hrtime(startTime)[1] / 1000000000;
 
@@ -207,11 +210,14 @@ class CybroComm extends EventEmitter {
 		let lock = await this.lock();
 
 		try {
-			let framePlcStart = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcStart]), this.password);
-			await this.send(framePlcStart);
-
-			let frameStatus = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.status]), this.password);
-			let status = await this.send(frameStatus);
+			// Send status package
+			let status = await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: Buffer.from([this.cmd.status]),
+				password: this.password
+			});
 
 			if (status.data[0] == 0){
 				return -1;
@@ -231,8 +237,14 @@ class CybroComm extends EventEmitter {
 		let lock = await this.lock();
 
 		try {
-			let framePlcStart = CybroComm.frame(0, 0, this.nadfrom, this.nadTo, Buffer.from([this.cmd.plcStart]), this.password);
-			await this.send(framePlcStart);
+			// Send PLC Start package
+			await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: Buffer.from([this.cmd.plcStart]),
+				password: this.password
+			});
 			return true;
 		} catch (e) {
 			return false;
@@ -247,8 +259,14 @@ class CybroComm extends EventEmitter {
 		let lock = await this.lock();
 
 		try {
-			let framePlcStop = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcStop]), this.password);
-			await this.send(framePlcStop);
+			// Send PLC Stop package
+			await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: Buffer.from([this.cmd.plcStop]),
+				password: this.password
+			});
 			return true;
 		} catch (e) {
 			return false;
@@ -263,16 +281,20 @@ class CybroComm extends EventEmitter {
 		let lock = await this.lock();
 
 		try {
-			let framePlcPause = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, Buffer.from([this.cmd.plcPause]), this.password);
-			await this.send(framePlcPause);
-
-			// Release the lock
-			lock.release();
+			// Send PLC Pause package
+			await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: Buffer.from([this.cmd.plcPause]),
+				password: this.password
+			});
 			return true;
 		} catch (e) {
+			return false;
+		} finally {
 			// Release the lock
 			lock.release();
-			return false;
 		}
 	}
 
@@ -309,9 +331,14 @@ class CybroComm extends EventEmitter {
 			frameDataBuf.writeUInt8(this.cmd.readCode);
 			frameDataBuf.writeUInt16LE(segment + i, 1);
 			frameDataBuf.writeUInt16LE(this.segmentSize, 3);
-			let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, frameDataBuf, this.password);
 
-			let chunkFrame = await this.send(frame);
+			let chunkFrame = await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: frameDataBuf,
+				password: this.password
+			});
 
 			data = Buffer.concat([data, chunkFrame.data], data.length + chunkFrame.data.length);
 		}
@@ -380,14 +407,18 @@ class CybroComm extends EventEmitter {
 			offset += 2;
 		}
 
-		// Create frame
-		let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, dataBuf, this.password);
-
 		// Wait for active connections
 		let lock = await this.lock();
 
 		try {
-			let responseFrame = await this.send(frame);
+			// Send frame to get data
+			let responseFrame = await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: dataBuf,
+				password: this.password
+			});
 
 			// Parse values
 			offset = 0;
@@ -497,14 +528,18 @@ class CybroComm extends EventEmitter {
 			offset += parseInt(controller.registry[variable.name].size);
 		}
 
-		// Create frame
-		let frame = CybroComm.frame(0, 0, this.nadFrom, this.nadTo, dataBuf, this.password);
-
 		// Wait for active connections
 		let lock = await this.lock();
 
 		try {
-			await this.send(frame);
+			// Write data to controller variables
+			await this.send({
+				direction: 0,
+				socket: 0,
+				nadTo: this.nadTo,
+				dataBuf: dataBuf,
+				password: this.password
+			});
 			return true;
 		} catch (e) {
 			return false;
@@ -514,7 +549,24 @@ class CybroComm extends EventEmitter {
 		}
 	}
 
-	async send(frame, retry = 5) {
+	async send(options, retry = 5) {
+		// Expand options
+		let { direction, socket, nadFrom, nadTo, dataBuf, password } = options;
+
+		// Evaluate nadFrom
+		nadFrom = nadFrom !== undefined ? nadFrom : this.nextNadFrom();
+
+		// Evaluate password
+		password = password !== undefined ? password : 0;
+
+		// Create udp4 frame package
+		let frame = null;
+		try {
+			frame = CybroComm.frame(direction, socket, nadFrom, nadTo, dataBuf, password);
+		} catch (e) {
+			return e;
+		}
+
 		return new Promise(async (resolve, reject) => {
 			this.socket.send(frame, this.port, this.address, (err) => {
 				// Reject on error
@@ -533,25 +585,34 @@ class CybroComm extends EventEmitter {
 			}
 
 			// Listen for the response event
-			this.once(`response`, callback);
+			this.once(`response_${nadFrom}`, callback);
 
 			// Set timeout for this request
 			timeout = setTimeout(async () => {
-				this.removeListener(`frame`, callback);
+				this.removeListener(`response_${nadFrom}`, callback);
 
 				// Retry failed attempt
 				if (retry > 1) {
 					try {
-						await this.send(frame, --retry);
-						resolve();
+						resolve(await this.send(options, --retry));
 					} catch (e) {
 						reject();
 					}
 				} else {
 					reject();
 				}
-			}, 3);
+			}, 5);
 		});
+	}
+
+	nextNadFrom(max) {
+		this.nadFromCurrent = this.nadFromCurrent ? this.nadFromCurrent + 1 : 4017370282;
+		this.nadFromCurrent = this.nadFromCurrent > 4027370282 ? 4017370282 : this.nadFromCurrent;
+		return this.nadFromCurrent;
+	}
+
+	static randomNadFrom(max) {
+		return 4000000000 + Math.floor(Math.random() * Math.floor(1000000));
 	}
 
 	static frame(direction, socket, nadFrom, nadTo, dataBuf, password) {
@@ -651,10 +712,6 @@ class CybroComm extends EventEmitter {
 
 		// Check if crc is the same
 		return crcBuf[0] == buf[buf.length - 2] && crcBuf[1] == buf[buf.length - 1]
-	}
-
-	static randomNad(max) {
-		return 4000000000 + Math.floor(Math.random() * Math.floor(1000000));
 	}
 }
 

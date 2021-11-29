@@ -20,7 +20,7 @@ class CybroController extends EventEmitter {
 		this.fileDescriptorSize = 46;
 
 		// TODO pick nadFrom from range
-		this.comm = new CybroComm(this, this.address, this.port, 4027470283, this.nad, this.password);
+		this.comm = new CybroComm(this, this.address, this.port, this.nad, this.password);
 
 		this.comm.on('socket', (frame) => {
 			this._processSocket(frame);
